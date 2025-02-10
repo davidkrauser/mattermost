@@ -3,5 +3,5 @@
 
 import {WebSocketClient} from '@mattermost/client';
 
-const WebClient = new WebSocketClient();
+const WebClient = new WebSocketClient({clientPingEnabled: true});
 export default WebClient;

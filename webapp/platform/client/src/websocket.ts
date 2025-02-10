@@ -5,6 +5,7 @@ const DEFAULT_MAX_WEBSOCKET_FAILS = 7;
 const DEFAULT_MIN_WEBSOCKET_RETRY_TIME = 3000; // 3 sec
 const DEFAULT_MAX_WEBSOCKET_RETRY_TIME = 300000; // 5 mins
 const DEFAULT_JITTER_RANGE = 2000; // 2 sec
+const DEFAULT_PING_INTERVAL = 30000; // 30 sec
 
 const WEBSOCKET_HELLO = 'hello';
 
@@ -20,7 +21,10 @@ export interface WebSocketClientConfig {
     minWebSocketRetryTime?: number;
     maxWebSocketRetryTime?: number;
     reconnectJitterRange?: number;
-    newWebSocketFn?: (url: string) => WebSocket;
+    reconnectJitterRange?: number,
+    newWebSocketFn?: (url: string) => WebSocket,
+    clientPingEnabled?: boolean,
+    clientPingInterval?: number,
 }
 
 export default class WebSocketClient {
@@ -82,6 +86,9 @@ export default class WebSocketClient {
     private serverHostname: string | null;
     private postedAck: boolean;
 
+    private pingCount: number;
+    private pingInterval: ReturnType<typeof setInterval> | null;
+
     private reconnectTimeout: ReturnType<typeof setTimeout> | null;
 
     constructor(config?: WebSocketClientConfig) {
@@ -89,12 +96,14 @@ export default class WebSocketClient {
         this.connectionUrl = null;
         this.responseSequence = 1;
         this.serverSequence = 0;
+        this.pingCount = 0;
         this.connectFailCount = 0;
         this.responseCallbacks = {};
         this.connectionId = '';
         this.serverHostname = '';
         this.postedAck = false;
         this.reconnectTimeout = null;
+        this.pingInterval = null;
         this.config = config ?? {};
     }
 
@@ -140,7 +149,7 @@ export default class WebSocketClient {
 
         this.conn.onopen = () => {
             if (token) {
-                this.sendMessage('authentication_challenge', {token});
+                this.sendMessage('authentication_challenge', { token });
             }
 
             if (this.connectFailCount > 0) {
@@ -151,6 +160,32 @@ export default class WebSocketClient {
             } else if (this.firstConnectCallback || this.firstConnectListeners.size > 0) {
                 this.firstConnectCallback?.();
                 this.firstConnectListeners.forEach((listener) => listener());
+            }
+
+            if (this.config.clientPingEnabled) {
+                var pingId = this.pingCount++;
+                var waitingForPong = false;
+                this.pingInterval = setInterval(
+                    () => {
+                        if (!waitingForPong) {
+                            console.log("ping: " + pingId)
+                            waitingForPong = true;
+                            this.ping(() => { waitingForPong = false; console.log("pong: " + pingId); });
+                            return;
+                        }
+                        console.log("restarting websocket: " + pingId);
+                        // We are not calling this.close() because we need to auto-restart.
+                        this.connectFailCount = 0;
+                        this.responseSequence = 1;
+                        if (this.pingInterval) {
+                            clearInterval(this.pingInterval);
+                            this.pingInterval = null;
+                        }
+                        this.conn?.close(); // Will auto-reconnect after MIN_WEBSOCKET_RETRY_TIME.
+                    },
+                    this.config.clientPingInterval ?
+                        this.config.clientPingInterval : DEFAULT_PING_INTERVAL,
+                );
             }
 
             this.connectFailCount = 0;
@@ -400,11 +435,30 @@ export default class WebSocketClient {
             clearTimeout(this.reconnectTimeout);
             this.reconnectTimeout = null;
         }
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
         if (this.conn && this.conn.readyState === WebSocket.OPEN) {
             this.conn.onclose = () => { };
             this.conn.close();
             this.conn = null;
             console.log('websocket closed'); //eslint-disable-line no-console
+        }
+    }
+
+    ping(responseCallback?: (msg: any) => void) {
+        const msg = {
+            action: "ping",
+            seq: this.responseSequence++,
+        };
+
+        if (responseCallback) {
+            this.responseCallbacks[msg.seq] = responseCallback;
+        }
+
+        if (this.conn && this.conn.readyState === WebSocket.OPEN) {
+            this.conn.send(JSON.stringify(msg));
         }
     }
 

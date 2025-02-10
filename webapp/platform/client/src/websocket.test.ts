@@ -106,6 +106,82 @@ describe('websocketclient', () => {
         }, 10);
     });
 
+    test('should stay connected after ping response', done => {
+        let mockWebSocket = new MockWebSocket();
+
+        let numPings = 0;
+        let numOpens = 0;
+        mockWebSocket.send = (evt) => {
+            if (mockWebSocket.onmessage) {
+                const ping = JSON.parse(evt);
+                const msg = {
+                    action: "pong",
+                    seq_reply: ping.seq,
+                };
+                mockWebSocket.onmessage({ data: JSON.stringify(msg) });
+            }
+            numPings++;
+        }
+
+        let client = new WebSocketClient({
+            newWebSocketFn: (url: string) => {
+                mockWebSocket.url = url;
+                if (mockWebSocket.onopen) {
+                    mockWebSocket.open();
+                    numOpens++;
+                }
+                return mockWebSocket;
+            },
+            minWebSocketRetryTime: 1,
+            reconnectJitterRange: 1,
+            clientPingEnabled: true,
+            clientPingInterval: 1,
+        });
+        client.initialize("mock.url")
+        mockWebSocket.open();
+        numOpens++;
+
+        setTimeout(() => {
+            client.close()
+            expect(numOpens).toBe(1)
+            expect(numPings).toBeGreaterThan(1)
+            done()
+        }, 10)
+    });
+
+    test('should reconnect after no ping response', done => {
+        let mockWebSocket = new MockWebSocket();
+
+        let numPings = 0;
+        let numOpens = 0;
+        mockWebSocket.send = () => { numPings++; return undefined };
+
+        let client = new WebSocketClient({
+            newWebSocketFn: (url: string) => {
+                mockWebSocket.url = url;
+                if (mockWebSocket.onopen) {
+                    mockWebSocket.open();
+                    numOpens++;
+                }
+                return mockWebSocket;
+            },
+            minWebSocketRetryTime: 1,
+            reconnectJitterRange: 1,
+            clientPingEnabled: true,
+            clientPingInterval: 1,
+        });
+        client.initialize("mock.url")
+        mockWebSocket.open();
+        numOpens++;
+
+        setTimeout(() => {
+            client.close()
+            expect(Math.abs(numOpens - numPings)).toBeLessThanOrEqual(1)
+            done()
+        }, 10)
+    });
+
+
     test('should close during reconnection delay', (done) => {
         const mockWebSocket = new MockWebSocket();
         mockWebSocket.open = jest.fn(mockWebSocket.open);
