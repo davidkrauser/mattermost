@@ -46,6 +46,7 @@ export default class WebSocketClient {
     private serverSequence: number;
     private connectFailCount: number;
     private responseCallbacks: {[x: number]: ((msg: any) => void)};
+    private lastCloseReason: string | null;
 
     /**
      * @deprecated Use messageListeners instead
@@ -105,6 +106,7 @@ export default class WebSocketClient {
         this.reconnectTimeout = null;
         this.config = {...defaultWebSocketClientConfig, ...config};
         this.pingInterval = null;
+        this.lastCloseReason = null;
     }
 
     // on connect, only send auth cookie and blank state.
@@ -138,7 +140,16 @@ export default class WebSocketClient {
         // Add connection id, and last_sequence_number to the query param.
         // We cannot use a cookie because it will bleed across tabs.
         // We cannot also send it as part of the auth_challenge, because the session cookie is already sent with the request.
-        const websocketUrl = `${connectionUrl}?connection_id=${this.connectionId}&sequence_number=${this.serverSequence}${this.postedAck ? '&posted_ack=true' : ''}`;
+        let websocketUrl = `${connectionUrl}?connection_id=${this.connectionId}&sequence_number=${this.serverSequence}`;
+
+        if (this.postedAck) {
+            websocketUrl += '&posted_ack=true'
+        }
+
+        if (this.lastCloseReason) {
+            websocketUrl += `&disconnect_reason=${encodeURIComponent(this.lastCloseReason)}`;
+        }
+        
         if (this.config.newWebSocketFn) {
             this.conn = this.config.newWebSocketFn(websocketUrl);
         } else {
@@ -150,6 +161,8 @@ export default class WebSocketClient {
             if (token) {
                 this.sendMessage('authentication_challenge', {token});
             }
+
+	    this.lastCloseReason = null;
 
             if (this.connectFailCount > 0) {
                 console.log('websocket re-established connection'); //eslint-disable-line no-console
@@ -183,6 +196,10 @@ export default class WebSocketClient {
 
                     console.log('ping received no response within time limit: re-establishing websocket'); //eslint-disable-line no-console
 
+                    // Set the close reason to status 1006, which is a general status
+                    // used when a websocket is closed abnormally.
+                    this.lastCloseReason = '1006:client_ping_timeout';
+
                     // We are not calling this.close() because we need to auto-restart.
                     this.connectFailCount = 0;
                     this.responseSequence = 1;
@@ -194,12 +211,19 @@ export default class WebSocketClient {
             this.connectFailCount = 0;
         };
 
-        this.conn.onclose = () => {
+        this.conn.onclose = (event) => {
             this.conn = null;
             this.responseSequence = 1;
 
+            if (!this.lastCloseReason && event.code) {
+                this.lastCloseReason = `${event.code}`;
+                if (event.reason) {
+                    this.lastCloseReason += `:${event.reason}`;
+		}
+            }
+
             if (this.connectFailCount === 0) {
-                console.log('websocket closed'); //eslint-disable-line no-console
+                console.log(`websocket closed: ${this.lastCloseReason}`); //eslint-disable-line no-console
             }
 
             this.connectFailCount++;
@@ -296,6 +320,11 @@ export default class WebSocketClient {
                 // we just disconnect and reconnect.
                 if (msg.seq !== this.serverSequence) {
                     console.log('missed websocket event, act_seq=' + msg.seq + ' exp_seq=' + this.serverSequence); //eslint-disable-line no-console
+
+                    // Set the close reason to status 4000, which is an unused status
+                    // available for applications to use for app specific errors.
+                    this.lastCloseReason = '4000:client_sequence_mismatch';
+
                     // We are not calling this.close() because we need to auto-restart.
                     this.connectFailCount = 0;
                     this.responseSequence = 1;
@@ -433,6 +462,7 @@ export default class WebSocketClient {
     close() {
         this.connectFailCount = 0;
         this.responseSequence = 1;
+        this.lastCloseReason = null;
         if (this.reconnectTimeout) {
             clearTimeout(this.reconnectTimeout);
             this.reconnectTimeout = null;
@@ -442,7 +472,7 @@ export default class WebSocketClient {
             this.conn.onclose = () => {};
             this.conn.close();
             this.conn = null;
-            console.log('websocket closed'); //eslint-disable-line no-console
+            console.log('websocket closed manually'); //eslint-disable-line no-console
         }
     }
 
